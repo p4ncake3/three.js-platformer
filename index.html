@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Three.js Platformer</title>
+<link rel="icon" href="three.js-favicon.png" type="image/png">
+<style>
+body { margin:0; overflow:hidden; background:black; }
+#ui{
+  position:absolute;
+  top:10px;
+  left:10px;
+  color:white;
+  font-family:Arial;
+  font-size:22px;
+  background:rgba(0,0,0,.5);
+  padding:6px 12px;
+  border-radius:6px;
+}
+</style>
+</head>
+<body>
+<div id="ui">Score: 0 | High: 0</div>
+
+<script type="module">
+import * as THREE from "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js";
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x87ceeb);
+scene.fog = new THREE.Fog(0x87ceeb,20,120);
+
+/* CAMERA */
+const camera = new THREE.PerspectiveCamera(75, innerWidth/innerHeight, 0.1, 1000);
+
+/* RENDERER */
+const renderer = new THREE.WebGLRenderer({ antialias:true });
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.2;
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.shadowMap.enabled = true;
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+
+/* LIGHTS */
+const ambient = new THREE.AmbientLight(0xffffff, 0.6);
+scene.add(ambient);
+const sun = new THREE.DirectionalLight(0xffffff, 0.9);
+sun.position.set(20,30,10);
+sun.castShadow = true;
+sun.shadow.mapSize.set(1024,1024);
+scene.add(sun);
+
+/* GROUND */
+const ground = new THREE.Mesh(
+  new THREE.PlaneGeometry(300,300),
+  new THREE.MeshStandardMaterial({color:0x2e8b57})
+);
+ground.rotation.x = -Math.PI/2;
+ground.receiveShadow = true;
+scene.add(ground);
+
+/* TREES (INSTANCED) */
+const treeGeo = new THREE.CylinderGeometry(.2,.2,1.5,6);
+const leavesGeo = new THREE.SphereGeometry(.8,6,6);
+const trunkMat = new THREE.MeshStandardMaterial({color:0x8b5a2b});
+const leavesMat = new THREE.MeshStandardMaterial({color:0x228b22});
+
+const treeCount = 30;
+const trunkInst = new THREE.InstancedMesh(treeGeo, trunkMat, treeCount);
+const leavesInst = new THREE.InstancedMesh(leavesGeo, leavesMat, treeCount);
+trunkInst.castShadow = true; leavesInst.castShadow = true;
+scene.add(trunkInst); scene.add(leavesInst);
+
+for(let i=0;i<treeCount;i++){
+  const x = Math.random()*200-100;
+  const z = Math.random()*200-100;
+  trunkInst.setMatrixAt(i, new THREE.Matrix4().makeTranslation(x,0.75,z));
+  leavesInst.setMatrixAt(i, new THREE.Matrix4().makeTranslation(x,1.9,z));
+}
+
+/* ROCKS (INSTANCED) */
+const rockGeo = new THREE.DodecahedronGeometry(.6,0);
+const rockMat = new THREE.MeshStandardMaterial({color:0x777777});
+const rockCount = 20;
+const rocksInst = new THREE.InstancedMesh(rockGeo, rockMat, rockCount);
+rocksInst.castShadow = true;
+scene.add(rocksInst);
+for(let i=0;i<rockCount;i++){
+  const x = Math.random()*200-100;
+  const z = Math.random()*200-100;
+  rocksInst.setMatrixAt(i, new THREE.Matrix4().makeTranslation(x,0.3,z));
+}
+
+/* CLOUDS */
+const cloudGeo = new THREE.SphereGeometry(1,6,6);
+const cloudMat = new THREE.MeshStandardMaterial({color:0xffffff});
+const cloudCount = 10;
+const cloudMeshes = [];
+for(let i=0;i<cloudCount;i++){
+  const cloud = new THREE.Group();
+  for(let j=0;j<6;j++){
+    const puff = new THREE.Mesh(cloudGeo, cloudMat);
+    puff.position.set(Math.random()*3,Math.random(),Math.random()*3);
+    cloud.add(puff);
+  }
+  cloud.position.set(Math.random()*120-60, 22+Math.random()*4, Math.random()*120-60);
+  scene.add(cloud); cloudMeshes.push(cloud);
+}
+
+/* PLAYER */
+const playerMesh = new THREE.Mesh(new THREE.BoxGeometry(.8,.8,.8), new THREE.MeshStandardMaterial({color:0x0077ff}));
+playerMesh.castShadow = true; scene.add(playerMesh);
+const player = {position:playerMesh.position};
+player.position.set(Math.random()*40-20, 2, Math.random()*40-20);
+
+/* INPUT */
+const keys = {};
+window.addEventListener("keydown", e=>keys[e.key.toLowerCase()] = true);
+window.addEventListener("keyup", e=>keys[e.key.toLowerCase()] = false);
+let velocityY=0, jumpsLeft=2, gravity=-.01;
+
+/* PLATFORMS (INSTANCED) */
+const platformGeo = new THREE.BoxGeometry(3,.5,3);
+const platformMat = new THREE.MeshStandardMaterial({color:0xaaaaaa});
+const maxPlatforms = 50;
+const platformInst = new THREE.InstancedMesh(platformGeo, platformMat, maxPlatforms);
+platformInst.castShadow = true; platformInst.receiveShadow = true;
+scene.add(platformInst);
+
+const platforms = []; // store data: {x,y,z,coin}
+const coins = [];
+const coinGeo = new THREE.CylinderGeometry(.4,.4,.2,16);
+const coinMat = new THREE.MeshStandardMaterial({color:0xffd700});
+
+function spawnPlatformInstance(x,z){
+  const y = Math.random()*6+1;
+  const index = platforms.length;
+  const matrix = new THREE.Matrix4().makeTranslation(x,y,z);
+  platformInst.setMatrixAt(index,matrix); platformInst.instanceMatrix.needsUpdate=true;
+  platforms.push({x,y,z,index});
+
+  // coin above
+  if(Math.random()<0.6){
+    const coin = new THREE.Mesh(coinGeo,coinMat);
+    coin.rotation.x = Math.PI/2;
+    coin.position.set(x,y+1,z);
+    scene.add(coin); coins.push(coin);
+  }
+}
+
+// initialize platforms
+for(let i=0;i<maxPlatforms;i++){
+  spawnPlatformInstance(Math.random()*60-30, Math.random()*60-30);
+}
+
+/* JUMP PADS */
+const jumpPads=[];
+const padGeo = new THREE.CylinderGeometry(1,1,.3,8);
+const padMat = new THREE.MeshStandardMaterial({color:0xff00ff});
+for(let i=0;i<5;i++){
+  const pad = new THREE.Mesh(padGeo,padMat);
+  pad.position.set(Math.random()*40-20,.15,Math.random()*40-20);
+  scene.add(pad); jumpPads.push(pad);
+}
+
+/* ENEMIES */
+const enemies=[], enemyGeo = new THREE.BoxGeometry(1,1,1);
+const enemyMat = new THREE.MeshStandardMaterial({color:0xff4444});
+function spawnEnemies(){
+  enemies.forEach(e=>scene.remove(e)); enemies.length=0;
+  for(let i=0;i<4;i++){
+    const e = new THREE.Mesh(enemyGeo, enemyMat);
+    e.position.set(Math.random()*50-25,.5,Math.random()*50-25);
+    scene.add(e); enemies.push(e);
+  }
+}
+spawnEnemies();
+
+/* SCORE */
+let score=0, highScore=localStorage.getItem("highscore")||0;
+const ui = document.getElementById("ui");
+function updateUI(){ ui.innerText = "Score: "+score+" | High: "+highScore; }
+updateUI();
+
+/* PLAYER UPDATE */
+function updatePlayer(){
+  const speed = keys["shift"] ? 0.25 : 0.15;
+  let dir = new THREE.Vector3();
+  if(keys["w"]) dir.z-=1;
+  if(keys["s"]) dir.z+=1;
+  if(keys["a"]) dir.x-=1;
+  if(keys["d"]) dir.x+=1;
+  dir.normalize();
+  player.position.x += dir.x*speed;
+  player.position.z += dir.z*speed;
+
+  if(keys[" "] && jumpsLeft>0){ velocityY=.25; jumpsLeft--; keys[" "]=false; }
+  velocityY += gravity;
+
+  let nextY = player.position.y + velocityY;
+  let grounded = false;
+  const playerHalf=.4;
+  if(nextY<=0.4){ nextY=0.4; velocityY=0; grounded=true; }
+
+  // platform collision
+  platforms.forEach(p=>{
+    if(Math.abs(player.position.x-p.x)<1.5 &&
+       Math.abs(player.position.z-p.z)<1.5 &&
+       player.position.y-playerHalf >= p.y &&
+       nextY-playerHalf <= p.y){
+      nextY=p.y+playerHalf; velocityY=0; grounded=true;
+    }
+  });
+  player.position.y=nextY;
+  if(grounded) jumpsLeft=2;
+
+  // jump pads
+  jumpPads.forEach(p=>{ if(player.position.distanceTo(p.position)<1.3 && velocityY<=0) velocityY=.45; });
+
+  // coins
+  coins.forEach((c,i)=>{
+    if(c.position.distanceTo(player.position)<50) c.rotation.y+=0.05;
+    if(player.position.distanceTo(c.position)<1){ scene.remove(c); coins.splice(i,1); score+=5; if(score>highScore){ highScore=score; localStorage.setItem("highscore",highScore);} updateUI(); }
+  });
+
+  // enemies
+  enemies.forEach(e=>{
+    const dir = new THREE.Vector3(player.position.x-e.position.x,0,player.position.z-e.position.z);
+    dir.normalize(); e.position.x+=dir.x*0.03; e.position.z+=dir.z*0.03;
+    if(player.position.distanceTo(e.position)<1.2){
+      score=0; updateUI();
+      player.position.set(Math.random()*40-20,2,Math.random()*40-20);
+      spawnEnemies();
+    }
+  });
+
+  // streaming platforms
+  platforms.forEach((p,i)=>{
+    if(player.position.distanceTo(new THREE.Vector3(p.x,p.y,p.z))>90){
+      spawnPlatformInstance(player.position.x+(Math.random()*40-20), player.position.z+(Math.random()*40-20));
+      // recycle instanced mesh
+      p.x = platforms[platforms.length-1].x;
+      p.y = platforms[platforms.length-1].y;
+      p.z = platforms[platforms.length-1].z;
+    }
+  });
+  platformInst.instanceMatrix.needsUpdate=true;
+
+  // smooth camera
+  const targetCam = new THREE.Vector3(player.position.x, player.position.y+3, player.position.z+6);
+  camera.position.lerp(targetCam,.1);
+  camera.lookAt(player.position);
+}
+
+/* RESIZE */
+window.addEventListener("resize", ()=>{
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+/* LOOP */
+function animate(){
+  requestAnimationFrame(animate);
+  updatePlayer();
+  renderer.render(scene,camera);
+}
+animate();
+
+</script>
+</body>
+</html>
